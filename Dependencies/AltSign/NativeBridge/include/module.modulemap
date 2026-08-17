@@ -1,0 +1,5 @@
+module NativeBridge {
+    umbrella header "NativeBridge.h"
+    private header "mz_config.h"
+    export *
+}
