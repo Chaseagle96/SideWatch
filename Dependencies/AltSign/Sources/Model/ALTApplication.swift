@@ -362,9 +362,7 @@ private extension ALTApplication {
             fallbackPlatform: applicationPlatform
         ))
 
-        let relativePath = application.fileURL == rootURL
-            ? ""
-            : application.fileURL.path.replacingOccurrences(of: rootURL.path + "/", with: "")
+        let relativePath = relativePath(of: application.fileURL, from: rootURL)
         return ALTSignedBundleNode(
             fileURL: application.fileURL,
             relativePath: relativePath,
@@ -409,7 +407,7 @@ private extension ALTApplication {
                 return nil
             }
 
-            let relativePath = item.path.replacingOccurrences(of: rootURL.path + "/", with: "")
+            let relativePath = relativePath(of: item, from: rootURL)
             if item.pathExtension.caseInsensitiveCompare("framework") == .orderedSame,
                values.isDirectory == true {
                 let bundle = Bundle(url: item)
@@ -448,6 +446,30 @@ private extension ALTApplication {
             }
             return nil
         }
+    }
+
+    static func relativePath(of itemURL: URL, from rootURL: URL) -> String {
+        let itemPath = itemURL.standardizedFileURL.path
+        let roots = [
+            rootURL.standardizedFileURL.path,
+            rootURL.resolvingSymlinksInPath().standardizedFileURL.path
+        ]
+
+        for rootPath in roots {
+            if itemPath == rootPath {
+                return ""
+            }
+            let prefix = rootPath + "/"
+            if itemPath.hasPrefix(prefix) {
+                return String(itemPath.dropFirst(prefix.count))
+            }
+        }
+
+        // Discovery only supplies descendants of rootURL. Returning the
+        // absolute path here makes an unexpected containment failure visible
+        // to signing/validation instead of silently producing the wrong
+        // relative component.
+        return itemPath
     }
 
     func loadExtensions() -> Set<ALTApplication> {

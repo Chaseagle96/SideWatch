@@ -199,8 +199,10 @@ extension FileManager {
             let isSymbolicLink = resourceValues.isSymbolicLink == true
             let isDirectory = resourceValues.isDirectory == true && !isSymbolicLink
 
-            let relative = fileURL.path
-                .replacingOccurrences(of: appBundleURL.path + "/", with: "")
+            let relative = try archiveRelativePath(
+                of: fileURL,
+                within: appBundleURL
+            )
 
             let zipPath = bundleRoot + "/" + relative + (isDirectory ? "/" : "")
 
@@ -232,5 +234,26 @@ extension FileManager {
 
         verboseLog("[AltSign] FileManager.zipAppBundle completed. Packaged ipa path: \(ipaURL.path)")
         return ipaURL
+    }
+
+    private func archiveRelativePath(of itemURL: URL, within rootURL: URL) throws -> String {
+        // Directory enumeration on macOS may canonicalize /var to
+        // /private/var. Compare against both forms, but do not resolve the
+        // item itself because it may be a framework symlink whose archive
+        // path must be preserved verbatim.
+        let itemPath = itemURL.standardizedFileURL.path
+        let roots = [
+            rootURL.standardizedFileURL.path,
+            rootURL.resolvingSymlinksInPath().standardizedFileURL.path
+        ]
+
+        for rootPath in roots {
+            let prefix = rootPath + "/"
+            if itemPath.hasPrefix(prefix) {
+                return String(itemPath.dropFirst(prefix.count))
+            }
+        }
+
+        throw ZipError.unsafeArchiveEntry(itemPath)
     }
 }
