@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: sidewatch-\${{ github.ref }}
+  group: sidewatch-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -24,15 +24,23 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Import source snapshot
+      - name: Reassemble and import source snapshot
         shell: bash
         run: |
           set -euo pipefail
 
-          if [[ -f SideStore-watch-support-source.tar.gz ]]; then
+          if [[ -f SideStore-watch-support-source.manifest ]]; then
+            expected_bytes="$(awk -F= '/^SIDEWATCH_SOURCE_BYTES=/{print $2}' SideStore-watch-support-source.manifest)"
+            expected_sha="$(awk -F= '/^SIDEWATCH_SOURCE_SHA256=/{print $2}' SideStore-watch-support-source.manifest)"
+            archive="/tmp/SideStore-watch-support-source.tar.gz"
+
+            cat SideStore-watch-support-source.tar.gz.part-* > "$archive"
+            test "$(stat -f %z "$archive")" = "$expected_bytes"
+            test "$(shasum -a 256 "$archive" | awk '{print $1}')" = "$expected_sha"
+
             rm -rf .sidewatch-source
             mkdir -p .sidewatch-source
-            tar -xzf SideStore-watch-support-source.tar.gz -C .sidewatch-source
+            tar -xzf "$archive" -C .sidewatch-source
 
             source_root="$(find .sidewatch-source -mindepth 1 -maxdepth 1 -type d -print -quit)"
             test -n "$source_root"
@@ -44,7 +52,10 @@ jobs:
               --exclude='.github/workflows/sidewatch-build.yml' \
               "$source_root/" ./
 
-            rm -rf .sidewatch-source SideStore-watch-support-source.tar.gz
+            rm -rf .sidewatch-source "$archive"
+            rm -f SideStore-watch-support-source.tar.gz \
+              SideStore-watch-support-source.manifest \
+              SideStore-watch-support-source.tar.gz.part-*
 
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -52,7 +63,7 @@ jobs:
 
             if ! git diff --cached --quiet; then
               git commit -m "Import SideStore Watch support source [skip ci]"
-              git push origin "HEAD:\${GITHUB_REF_NAME}"
+              git push origin "HEAD:${GITHUB_REF_NAME}"
             fi
           fi
 
@@ -101,7 +112,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: SideWatch-SideStore-\${{ github.run_number }}
+          name: SideWatch-SideStore-${{ github.run_number }}
           path: SideStore.ipa
           if-no-files-found: warn
           retention-days: 14
@@ -110,7 +121,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: SideWatch-dSYMs-\${{ github.run_number }}
+          name: SideWatch-dSYMs-${{ github.run_number }}
           path: SideStore.dSYMs.zip
           if-no-files-found: warn
           retention-days: 14
@@ -119,7 +130,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: SideWatch-build-logs-\${{ github.run_number }}
+          name: SideWatch-build-logs-${{ github.run_number }}
           path: |
             build-run.log
             build/logs/**
