@@ -40,6 +40,7 @@ let package = Package(
         .target(
             name: "NativeBridge",
             dependencies: [
+                "OpenSSL"
             ],
             path: ".",
             sources: [
