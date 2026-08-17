@@ -32,17 +32,18 @@ jobs:
           if [[ -f SideStore-watch-support-source.manifest ]]; then
             expected_bytes="$(awk -F= '/^SIDEWATCH_SOURCE_BYTES=/{print $2}' SideStore-watch-support-source.manifest)"
             expected_sha="$(awk -F= '/^SIDEWATCH_SOURCE_SHA256=/{print $2}' SideStore-watch-support-source.manifest)"
-            archive="/tmp/SideStore-watch-support-source.tar.gz"
+            archive="$RUNNER_TEMP/SideStore-watch-support-source.tar.gz"
+            extract_dir="$RUNNER_TEMP/sidewatch-source"
 
             cat SideStore-watch-support-source.tar.gz.part-* > "$archive"
             test "$(stat -f %z "$archive")" = "$expected_bytes"
             test "$(shasum -a 256 "$archive" | awk '{print $1}')" = "$expected_sha"
 
-            rm -rf .sidewatch-source
-            mkdir -p .sidewatch-source
-            tar -xzf "$archive" -C .sidewatch-source
+            rm -rf "$extract_dir"
+            mkdir -p "$extract_dir"
+            tar -xzf "$archive" -C "$extract_dir"
 
-            source_root="$(find .sidewatch-source -mindepth 1 -maxdepth 1 -type d -print -quit)"
+            source_root="$(find "$extract_dir" -mindepth 1 -maxdepth 1 -type d -print -quit)"
             test -n "$source_root"
             test -f "$source_root/AltStore.xcodeproj/project.pbxproj"
             test -f "$source_root/scripts/ci/workflow.py"
@@ -52,9 +53,8 @@ jobs:
               --exclude='.github/workflows/sidewatch-build.yml' \
               "$source_root/" ./
 
-            rm -rf .sidewatch-source "$archive"
-            rm -f SideStore-watch-support-source.tar.gz \
-              SideStore-watch-support-source.manifest \
+            rm -rf "$extract_dir" "$archive"
+            rm -f SideStore-watch-support-source.manifest \
               SideStore-watch-support-source.tar.gz.part-*
 
             git config user.name "github-actions[bot]"
