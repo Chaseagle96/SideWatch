@@ -1,0 +1,127 @@
+name: SideWatch macOS Xcode build
+
+on:
+  push:
+    branches: [watch-support]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sidewatch-\${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build SideStore watch-support fork
+    runs-on: macos-26
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out bootstrap commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Import source snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -f SideStore-watch-support-source.tar.gz ]]; then
+            rm -rf .sidewatch-source
+            mkdir -p .sidewatch-source
+            tar -xzf SideStore-watch-support-source.tar.gz -C .sidewatch-source
+
+            source_root="$(find .sidewatch-source -mindepth 1 -maxdepth 1 -type d -print -quit)"
+            test -n "$source_root"
+            test -f "$source_root/AltStore.xcodeproj/project.pbxproj"
+            test -f "$source_root/scripts/ci/workflow.py"
+
+            rsync -a --delete \
+              --exclude='.git/' \
+              --exclude='.github/workflows/sidewatch-build.yml' \
+              "$source_root/" ./
+
+            rm -rf .sidewatch-source SideStore-watch-support-source.tar.gz
+
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -A
+
+            if ! git diff --cached --quiet; then
+              git commit -m "Import SideStore Watch support source [skip ci]"
+              git push origin "HEAD:\${GITHUB_REF_NAME}"
+            fi
+          fi
+
+      - name: Select Xcode
+        uses: maxim-lobanov/setup-xcode@v1.6.0
+        with:
+          xcode-version: "26.4"
+
+      - name: Install build tools
+        run: brew install ldid xcbeautify
+
+      - name: Verify Apple toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+          ldid --help >/dev/null
+
+      - name: Build archive and IPA
+        shell: bash
+        run: |
+          set -o pipefail
+          python3 scripts/ci/workflow.py build 2>&1 | tee build-run.log
+
+      - name: Verify IPA structure
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s SideStore.ipa
+          unzip -tq SideStore.ipa
+          python3 - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          ipa = Path("SideStore.ipa")
+          with ZipFile(ipa) as archive:
+              names = set(archive.namelist())
+
+          root = "Payload/SideStore.app/"
+          assert root in names, "Payload/SideStore.app/ is missing"
+          assert root + "SideStore" in names, "SideStore executable is missing"
+          assert any(name.startswith(root + "PlugIns/") and name.endswith(".appex/") for name in names), "embedded extension is missing"
+          print(f"Verified {ipa} with {len(names)} archive entries")
+          PY
+
+      - name: Upload IPA
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SideWatch-SideStore-\${{ github.run_number }}
+          path: SideStore.ipa
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload dSYMs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SideWatch-dSYMs-\${{ github.run_number }}
+          path: SideStore.dSYMs.zip
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SideWatch-build-logs-\${{ github.run_number }}
+          path: |
+            build-run.log
+            build/logs/**
+          if-no-files-found: warn
+          retention-days: 14
