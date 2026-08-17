@@ -16,29 +16,22 @@ final class PrepareAppExtensionBundleIDsOperation: BasePipelineOperation<AppOper
         
         if let appBundle = self.context.targetAppBundle,
            let profiles = self.context.provisioningProfiles,
-           let mainProfile = profiles[self.context.targetBundleIdentifier]
+           profiles[self.context.targetBundleIdentifier] != nil
         {
-            let originalRootBundleID = appBundle.bundleIdentifier
-            let effectiveRootBundleID = self.context.targetBundleIdentifier
+            let mapping = ALTBundleIdentifierMapping(
+                originalRootIdentifier: appBundle.bundleIdentifier,
+                mappedRootIdentifier: self.context.targetBundleIdentifier
+            )
             var appexBundleIds: [String: String] = [:]
 
             for embeddedBundle in appBundle.allEmbeddedApplications {
-                let effectiveBundleID: String
-                if embeddedBundle.bundleIdentifier == originalRootBundleID {
-                    effectiveBundleID = effectiveRootBundleID
-                } else if embeddedBundle.bundleIdentifier.hasPrefix(originalRootBundleID + ".") {
-                    effectiveBundleID = effectiveRootBundleID + String(embeddedBundle.bundleIdentifier.dropFirst(originalRootBundleID.count))
-                } else {
-                    effectiveBundleID = embeddedBundle.bundleIdentifier
+                let effectiveBundleID = mapping.mappedIdentifier(for: embeddedBundle.bundleIdentifier)
+                guard let profile = profiles[effectiveBundleID] else {
+                    throw OperationError.invalidParameters(
+                        "No exact provisioning profile was generated for nested bundle '\(embeddedBundle.bundleIdentifier)' (mapped as '\(effectiveBundleID)')."
+                    )
                 }
-
-                if let profile = profiles[effectiveBundleID] {
-                    appexBundleIds[effectiveBundleID] = profile.bundleIdentifier
-                } else if self.context.useMainProfile && !embeddedBundle.isWatchOSBundle {
-                    // Ordinary iOS extensions can share the parent profile.
-                    // A watchOS bundle must have an exact profile entry.
-                    appexBundleIds[effectiveBundleID] = mainProfile.bundleIdentifier
-                }
+                appexBundleIds[effectiveBundleID] = profile.bundleIdentifier
             }
 
             self.context.appexBundleIds = appexBundleIds

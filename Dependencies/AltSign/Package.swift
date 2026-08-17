@@ -143,6 +143,11 @@ let package = Package(
             name: "AltSign",
             dependencies: ["SwiftBridge"],
             path: "Sources"
+        ),
+        .testTarget(
+            name: "AltSignTests",
+            dependencies: ["AltSign"],
+            path: "Tests/AltSignTests"
         )
     ],
 

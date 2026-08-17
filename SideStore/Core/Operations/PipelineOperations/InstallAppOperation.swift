@@ -265,42 +265,29 @@ final class InstallAppOperation: BasePipelineOperation<InstallAppOperationContex
                                          in backgroundContext: NSManagedObjectContext) throws -> Set<InstalledExtension>
     {
         var installedExtensions = Set<InstalledExtension>()
-        
-        if let bundle = Bundle(url: resignedAppBundle.fileURL),
-            let directory = bundle.builtInPlugInsURL,
-            let enumerator = FileManager.default.enumerator(
-                at: directory,
-                includingPropertiesForKeys: nil,
-                options: [.skipsSubdirectoryDescendants])
-        {
-            for case let fileURL as URL in enumerator {
-                guard let appExtensionBundle = Bundle(url: fileURL) else { continue }
-                guard let appExtension = ALTApplication(fileURL: appExtensionBundle.bundleURL) else { continue }
-                
-                let parentBundleID = context.bundleIdentifier
-                let resignedParentBundleID = resignedAppBundle.bundleIdentifier
-                
-                let resignedBundleID = appExtension.bundleIdentifier
-                let appExBundleID = resignedBundleID.replacingOccurrences(of: resignedParentBundleID, with: parentBundleID)
-                
-                self.debugLog("""
-                [InstallAppOperation] Extension Bundle Mapping:
-                  • parentBundleID         : \(parentBundleID)
-                  • resignedParentBundleID : \(resignedParentBundleID)
-                  • appExBundleID          : \(appExBundleID)
-                  • resignedAppExBundleID  : \(resignedBundleID)
-                """)
-                
-                let installedExtension = try installedApp.appExtensions
-                                                .first(where: { $0.bundleIdentifier == appExBundleID })
-                                            ?? InstalledExtension(
-                                                resignedAppExtensionBundle: appExtension,
-                                                originalBundleIdentifier: appExBundleID,
-                                                context: backgroundContext
-                                            )
-                installedExtension.update(resignedAppExtensionBundle: appExtension)
-                installedExtensions.insert(installedExtension)
-            }
+
+        // Core Data retains the historical InstalledExtension entity, but it
+        // now represents every nested provisioned component, including Watch
+        // apps and Watch extensions. ALTOriginalBundleIdentifier preserves a
+        // lossless mapping even for identifiers outside the root namespace.
+        for component in resignedAppBundle.allEmbeddedApplications.sorted(by: { $0.fileURL.path < $1.fileURL.path }) {
+            let originalIdentifier = component.originalBundleIdentifier
+            self.debugLog("""
+            [InstallAppOperation] Nested Component Mapping:
+              • originalBundleID : \(originalIdentifier)
+              • resignedBundleID : \(component.bundleIdentifier)
+              • platform         : \(component.isWatchOSBundle ? "watchOS" : "iOS")
+            """)
+
+            let installedExtension = try installedApp.appExtensions
+                .first(where: { $0.bundleIdentifier == originalIdentifier })
+                ?? InstalledExtension(
+                    resignedAppExtensionBundle: component,
+                    originalBundleIdentifier: originalIdentifier,
+                    context: backgroundContext
+                )
+            installedExtension.update(resignedAppExtensionBundle: component)
+            installedExtensions.insert(installedExtension)
         }
 
         return installedExtensions

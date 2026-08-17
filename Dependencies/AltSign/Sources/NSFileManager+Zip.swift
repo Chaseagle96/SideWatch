@@ -12,6 +12,8 @@ extension FileManager {
     // POSIX file type flags (external attributes in ZIP catalog are shifted by 16 bits)
     private static let S_IFREG: UInt32 = 0o100000 // Regular file
     private static let S_IFDIR: UInt32 = 0o040000 // Directory
+    private static let S_IFLNK: UInt32 = 0o120000 // Symbolic link
+    private static let S_IFMT: UInt32 = 0o170000  // File type mask
 
     // Default permissions when not defined in the source archive
     private static let defaultFilePermissions: UInt32 = 0o644
@@ -37,10 +39,20 @@ extension FileManager {
                 continue
             }
 
-            let outputURL =
-                directoryURL.appendingPathComponent(name)
+            let pathComponents = name.split(separator: "/", omittingEmptySubsequences: true)
+            guard !name.hasPrefix("/"),
+                  !pathComponents.contains(where: { $0 == ".." }) else {
+                throw ZipError.unsafeArchiveEntry(name)
+            }
+
+            let outputURL = directoryURL.appendingPathComponent(name).standardizedFileURL
+            let extractionRoot = directoryURL.standardizedFileURL.path
+            guard outputURL.path == extractionRoot || outputURL.path.hasPrefix(extractionRoot + "/") else {
+                throw ZipError.unsafeArchiveEntry(name)
+            }
 
             let externalAttributes = archive.currentFileExternalAttributes()
+            let fileType = (externalAttributes >> 16) & Self.S_IFMT
             var permissions = (externalAttributes >> 16) & 0x01FF
             if permissions == 0 {
                 permissions = name.hasSuffix("/") ? Self.defaultDirPermissions : Self.defaultFilePermissions
@@ -53,6 +65,28 @@ extension FileManager {
                     withIntermediateDirectories: true,
                     attributes: [.posixPermissions: NSNumber(value: permissions)]
                 )
+                continue
+            }
+
+            if fileType == Self.S_IFLNK {
+                let targetData = try archive.readCurrentFile()
+                guard let target = String(data: targetData, encoding: .utf8),
+                      !target.hasPrefix("/") else {
+                    throw ZipError.unsafeSymbolicLink(name)
+                }
+
+                let resolvedTarget = outputURL.deletingLastPathComponent()
+                    .appendingPathComponent(target)
+                    .standardizedFileURL
+                guard resolvedTarget.path == extractionRoot || resolvedTarget.path.hasPrefix(extractionRoot + "/") else {
+                    throw ZipError.unsafeSymbolicLink("\(name) -> \(target)")
+                }
+
+                try createDirectory(
+                    at: outputURL.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+                try createSymbolicLink(atPath: outputURL.path, withDestinationPath: target)
                 continue
             }
 
@@ -88,21 +122,28 @@ extension FileManager {
         let contents = try contentsOfDirectory(atPath: payload.path)
         verboseLog("[AltSign] FileManager.unzipAppBundle: checking payload folder contents: \(contents)")
 
-        for file in contents where file.lowercased().hasSuffix(".app") {
-
-            let appURL = payload.appendingPathComponent(file)
-            let outputURL = directoryURL.appendingPathComponent(file)
-
-            verboseLog("[AltSign] FileManager.unzipAppBundle: moving app bundle from \(appURL.path) to \(outputURL.path)")
-            try moveItem(at: appURL, to: outputURL)
-            try removeItem(at: payload)
-
-            verboseLog("[AltSign] FileManager.unzipAppBundle completed. Return app path: \(outputURL.path)")
-            return outputURL
+        let applications = contents.filter { file in
+            guard file.lowercased().hasSuffix(".app") else { return false }
+            var isDirectory: ObjCBool = false
+            return fileExists(
+                atPath: payload.appendingPathComponent(file).path,
+                isDirectory: &isDirectory
+            ) && isDirectory.boolValue
+        }
+        guard applications.count == 1, let file = applications.first else {
+            verboseLog("[AltSign] FileManager.unzipAppBundle error: expected one app, found \(applications.count)")
+            throw ZipError.invalidAppBundleCount(ipaURL, applications.count)
         }
 
-        verboseLog("[AltSign] FileManager.unzipAppBundle error: missing app bundle inside Payload folder of \(ipaURL.path)")
-        throw ZipError.missingAppBundle(ipaURL)
+        let appURL = payload.appendingPathComponent(file)
+        let outputURL = directoryURL.appendingPathComponent(file)
+
+        verboseLog("[AltSign] FileManager.unzipAppBundle: moving app bundle from \(appURL.path) to \(outputURL.path)")
+        try moveItem(at: appURL, to: outputURL)
+        try removeItem(at: payload)
+
+        verboseLog("[AltSign] FileManager.unzipAppBundle completed. Return app path: \(outputURL.path)")
+        return outputURL
     }
 
     public func unzipAppBundle(at ipaURL: URL, toDirectory directoryURL: URL) throws -> URL {
@@ -137,28 +178,44 @@ extension FileManager {
 
         let enumerator = self.enumerator(
             at: appBundleURL,
-            includingPropertiesForKeys: [.isDirectoryKey]
+            includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey]
         )!
 
         verboseLog("[AltSign] FileManager.zipAppBundle: enumerating contents of app bundle...")
         for case let fileURL as URL in enumerator {
 
-            var isDir: ObjCBool = false
-            fileExists(atPath: fileURL.path, isDirectory: &isDir)
+            let resourceValues = try fileURL.resourceValues(
+                forKeys: [.isDirectoryKey, .isSymbolicLinkKey]
+            )
+            let isSymbolicLink = resourceValues.isSymbolicLink == true
+            let isDirectory = resourceValues.isDirectory == true && !isSymbolicLink
 
             let relative = fileURL.path
                 .replacingOccurrences(of: appBundleURL.path + "/", with: "")
 
             let zipPath =
                 bundleRoot.appendingPathComponent(relative).path +
-                (isDir.boolValue ? "/" : "")
+                (isDirectory ? "/" : "")
 
             let attributes = try self.attributesOfItem(atPath: fileURL.path)
-            let posixPermissions = (attributes[.posixPermissions] as? NSNumber)?.uint32Value ?? (isDir.boolValue ? Self.defaultDirPermissions : Self.defaultFilePermissions)
+            let posixPermissions = (attributes[.posixPermissions] as? NSNumber)?.uint32Value ?? (isDirectory ? Self.defaultDirPermissions : Self.defaultFilePermissions)
 
-            verboseLog("[AltSign] FileManager.zipAppBundle: writing zip entry relative: \(relative), path in zip: \(zipPath), isDir: \(isDir.boolValue), permissions: \(String(format: "%0o", posixPermissions))")
+            verboseLog("[AltSign] FileManager.zipAppBundle: writing zip entry relative: \(relative), path in zip: \(zipPath), isDir: \(isDirectory), isSymlink: \(isSymbolicLink), permissions: \(String(format: "%0o", posixPermissions))")
 
-            if isDir.boolValue {
+            if isSymbolicLink {
+                let target = try destinationOfSymbolicLink(atPath: fileURL.path)
+                let resolvedTarget = fileURL.deletingLastPathComponent()
+                    .appendingPathComponent(target)
+                    .standardizedFileURL
+                let bundlePath = appBundleURL.standardizedFileURL.path
+                guard !target.hasPrefix("/"),
+                      resolvedTarget.path.hasPrefix(bundlePath + "/"),
+                      let data = target.data(using: .utf8) else {
+                    throw ZipError.unsafeSymbolicLink("\(relative) -> \(target)")
+                }
+                let permissions = Self.S_IFLNK + posixPermissions
+                try writer.writeFile(path: zipPath, data: data, permissions: permissions)
+            } else if isDirectory {
                 let permissions = Self.S_IFDIR + posixPermissions
                 try writer.writeFile(path: zipPath, data: nil, permissions: permissions)
             } else {

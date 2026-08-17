@@ -230,6 +230,9 @@ public enum ZipError: Error {
     case readFailed(URL)
     case writeFailed(URL)
     case missingAppBundle(URL)
+    case invalidAppBundleCount(URL, Int)
+    case unsafeArchiveEntry(String)
+    case unsafeSymbolicLink(String)
 }
 
 // MARK: - LocalizedError
@@ -253,6 +256,15 @@ extension ZipError: LocalizedError {
 
         case .missingAppBundle(let url):
             return "No .app bundle found inside \(url.lastPathComponent)"
+
+        case .invalidAppBundleCount(let url, let count):
+            return "Expected exactly one .app in \(url.lastPathComponent), found \(count)"
+
+        case .unsafeArchiveEntry(let name):
+            return "Archive contains an unsafe path: \(name)"
+
+        case .unsafeSymbolicLink(let name):
+            return "Archive contains an unsafe symbolic link: \(name)"
         }
     }
 }

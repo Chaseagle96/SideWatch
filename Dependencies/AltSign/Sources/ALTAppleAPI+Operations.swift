@@ -108,6 +108,9 @@ public extension ALTAppleAPI {
         } else if type.contains(.appleTV) {
             parameters["DTDK_Platform"] = "tvos"
             parameters["subPlatform"] = "tvOS"
+        } else if type.contains(.watch) {
+            parameters["DTDK_Platform"] = "ios"
+            parameters["subPlatform"] = "watchOS"
         }
         
         self.sendRequest(url: url, additionalParameters: parameters, session: session, team: team) { responseDictionary, requestError in

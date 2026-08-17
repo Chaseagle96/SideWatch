@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: sidewatch-${{ github.ref }}
@@ -19,53 +19,20 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - name: Check out bootstrap commit
+      - name: Check out exact source commit
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Reassemble and import source snapshot
+      - name: Verify checkout identity and cleanliness
         shell: bash
         run: |
           set -euo pipefail
-
-          if [[ -f SideStore-watch-support-source.manifest ]]; then
-            expected_bytes="$(awk -F= '/^SIDEWATCH_SOURCE_BYTES=/{print $2}' SideStore-watch-support-source.manifest)"
-            expected_sha="$(awk -F= '/^SIDEWATCH_SOURCE_SHA256=/{print $2}' SideStore-watch-support-source.manifest)"
-            archive="$RUNNER_TEMP/SideStore-watch-support-source.tar.gz"
-            extract_dir="$RUNNER_TEMP/sidewatch-source"
-
-            cat SideStore-watch-support-source.tar.gz.part-* > "$archive"
-            test "$(stat -f %z "$archive")" = "$expected_bytes"
-            test "$(shasum -a 256 "$archive" | awk '{print $1}')" = "$expected_sha"
-
-            rm -rf "$extract_dir"
-            mkdir -p "$extract_dir"
-            tar -xzf "$archive" -C "$extract_dir"
-
-            source_root="$(find "$extract_dir" -mindepth 1 -maxdepth 1 -type d -print -quit)"
-            test -n "$source_root"
-            test -f "$source_root/AltStore.xcodeproj/project.pbxproj"
-            test -f "$source_root/scripts/ci/workflow.py"
-
-            rsync -a --delete \
-              --exclude='.git/' \
-              --exclude='.github/' \
-              "$source_root/" ./
-
-            rm -rf "$extract_dir" "$archive"
-            rm -f SideStore-watch-support-source.manifest \
-              SideStore-watch-support-source.tar.gz.part-*
-
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add -A
-
-            if ! git diff --cached --quiet; then
-              git commit -m "Import SideStore Watch support source [skip ci]"
-              git push origin "HEAD:${GITHUB_REF_NAME}"
-            fi
-          fi
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git diff --exit-code
+          git status --short
+          test -f Dependencies/AltSign/Package.swift
+          test -f Dependencies/minimuxer/Package.swift
 
       - name: Select Xcode
         uses: maxim-lobanov/setup-xcode@v1.6.0
@@ -82,40 +49,100 @@ jobs:
           command -v ldid
           command -v xcbeautify
 
+      - name: Resolve Swift packages
+        shell: bash
+        run: |
+          set -o pipefail
+          xcodebuild -resolvePackageDependencies \
+            -project AltStore.xcodeproj \
+            -scheme SideStore \
+            2>&1 | tee package-resolution.log
+
+      - name: Run recursive IPA regression tests
+        shell: bash
+        run: |
+          set -o pipefail
+          python3 -m unittest discover -s tests -v 2>&1 | tee python-tests.log
+
+      - name: Run AltSign model and reconciliation tests
+        shell: bash
+        run: |
+          set -o pipefail
+          swift test \
+            --package-path Dependencies/AltSign \
+            2>&1 | tee altsign-tests.log
+
       - name: Build archive and IPA
         shell: bash
         run: |
           set -o pipefail
           python3 scripts/ci/workflow.py build 2>&1 | tee build-run.log
+          cp SideStore.ipa SideWatch-Unsigned.ipa
+          shasum -a 256 SideWatch-Unsigned.ipa | tee SideWatch-Unsigned.ipa.sha256
 
-      - name: Verify IPA structure
+      - name: Verify unsigned IPA structure recursively
         shell: bash
         run: |
           set -euo pipefail
-          test -s SideStore.ipa
-          unzip -tq SideStore.ipa
+          test -s SideWatch-Unsigned.ipa
+          unzip -tq SideWatch-Unsigned.ipa
+          python3 scripts/validate_ipa.py \
+            SideWatch-Unsigned.ipa \
+            --structure-only \
+            | tee ipa-structure-validation.md
+          unzip -Z1 SideWatch-Unsigned.ipa | grep -Eq '^Payload/[^/]+\.app/SideBackup\.ipa$'
+          unzip -Z1 SideWatch-Unsigned.ipa | grep -Eq '^Payload/[^/]+\.app/PlugIns/[^/]+\.appex/'
+
+      - name: Prove artifact is not mislabeled as installable
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          python3 scripts/validate_ipa.py \
+            SideWatch-Unsigned.ipa \
+            --verify-codesign \
+            --json \
+            > ipa-signed-validation.json
+          validation_status=$?
+          set -e
+          test "$validation_status" -ne 0
+          grep -q 'embedded.mobileprovision is missing' ipa-signed-validation.json
+          echo "The unsigned AltServer input correctly fails signed-installability validation."
+
+      - name: Write verification status
+        shell: bash
+        run: |
           python3 - <<'PY'
+          import json
+          import os
           from pathlib import Path
-          from zipfile import ZipFile
 
-          ipa = Path("SideStore.ipa")
-          with ZipFile(ipa) as archive:
-              names = set(archive.namelist())
-
-          root = "Payload/SideStore.app/"
-          assert root in names, "Payload/SideStore.app/ is missing"
-          assert root + "SideStore" in names, "SideStore executable is missing"
-          assert root + "SideBackup.ipa" in names, "SideBackup.ipa resource is missing"
-          assert any(name.startswith(root + "PlugIns/") and name.endswith(".appex/") for name in names), "embedded extension is missing"
-          print(f"Verified {ipa} with {len(names)} archive entries")
+          status = {
+              "commit": os.environ["GITHUB_SHA"],
+              "branch": os.environ["GITHUB_REF_NAME"],
+              "compile": "PASS",
+              "python_regression_tests": "PASS",
+              "altsign_swift_tests": "PASS",
+              "ipa_structure": "PASS",
+              "artifact_class": "UNSIGNED_ALT_SERVER_INPUT",
+              "signed_installability": "NOT_TESTED_NO_CREDENTIALS",
+              "device_install": "NOT_TESTED",
+              "watch_device_install": "NOT_TESTED",
+          }
+          Path("ci-verification-status.json").write_text(
+              json.dumps(status, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
           PY
 
-      - name: Upload IPA
+      - name: Upload unsigned AltServer input IPA
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: SideWatch-SideStore-${{ github.run_number }}
-          path: SideStore.ipa
+          name: SideWatch-UNSIGNED-AltServer-input-${{ github.run_number }}
+          path: |
+            SideWatch-Unsigned.ipa
+            SideWatch-Unsigned.ipa.sha256
           if-no-files-found: warn
           retention-days: 14
 
@@ -135,6 +162,12 @@ jobs:
           name: SideWatch-build-logs-${{ github.run_number }}
           path: |
             build-run.log
+            package-resolution.log
+            python-tests.log
+            altsign-tests.log
+            ipa-structure-validation.md
+            ipa-signed-validation.json
+            ci-verification-status.json
             build/logs/**
           if-no-files-found: warn
           retention-days: 14

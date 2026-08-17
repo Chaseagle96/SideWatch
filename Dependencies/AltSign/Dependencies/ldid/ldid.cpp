@@ -2986,7 +2986,10 @@ Bundle Sign(const std::string &root, Folder &parent, const std::string &key, Sta
     }
 
     std::string failure(mac ? "Contents/|Versions/[^/]*/Resources/" : "");
-    Expression nested("^(Frameworks/[^/]*\\.framework|PlugIns/[^/]*\\.appex(()|/[^/]*.app))/(" + failure + ")Info\\.plist$");
+    // WatchKit companion applications are first-class nested signed bundles,
+    // just like PlugIns and Frameworks. Discover them here so recursive Sign
+    // seals their frameworks/extensions before the enclosing iOS app.
+    Expression nested("^(Frameworks/[^/]*\\.framework|PlugIns/[^/]*\\.appex(()|/[^/]*.app)|Watch/[^/]*\\.app|WatchKit/[^/]*\\.app)/(" + failure + ")Info\\.plist$");
     std::map<std::string, Bundle> bundles;
 
     folder.Find("", fun([&](const std::string &name) {
@@ -3000,8 +3003,13 @@ Bundle Sign(const std::string &root, Folder &parent, const std::string &key, Sta
         SubFolder subfolder(folder, bundle);
 
         State remote;
-        bundles[nested[1]] = Sign(root + bundle, subfolder, key, remote, "", Starts(name, "PlugIns/") ? alter :
-            static_cast<const Functor<std::string (const std::string &, const std::string &)> &>(fun([&](const std::string &, const std::string &) -> std::string { return entitlements; }))
+        const bool hasIndependentEntitlements = Starts(name, "PlugIns/") || Starts(name, "Watch/") || Starts(name, "WatchKit/");
+        // Application and extension bundles receive their own reconciled
+        // entitlements. Framework executables are sealed code, not entitlement
+        // containers, so do not copy the enclosing app's entitlements into
+        // them.
+        bundles[nested[1]] = Sign(root + bundle, subfolder, key, remote, "", hasIndependentEntitlements ? alter :
+            static_cast<const Functor<std::string (const std::string &, const std::string &)> &>(fun([&](const std::string &, const std::string &) -> std::string { return ""; }))
         , progress);
         local.Merge(bundle, remote);
     }), fun([&](const std::string &name, const Functor<std::string ()> &read) {

@@ -260,7 +260,7 @@ fakesign-sidebackup:
 	ldid -SSideBackup/SideBackup.entitlements SideStore.xcarchive/Products/Applications/SideStore.app/Payload/SideBackup.app/SideBackup
 	pushd "SideStore.xcarchive/Products/Applications/SideStore.app/"  > /dev/null; \
 	rm -f     SideBackup.ipa; \
-	zip -r SideBackup.ipa Payload; \
+	zip -yr SideBackup.ipa Payload; \
 	popd  > /dev/null
 	@rm -rf SideStore.xcarchive/Products/Applications/SideStore.app/Payload
 
@@ -273,7 +273,7 @@ ipa:
 	mkdir -p Payload/SideStore.app
 	cp -R SideStore.xcarchive/Products/Applications/SideStore.app/ Payload/SideStore.app/
 	rm -f     SideStore.ipa
-	zip -r SideStore.ipa Payload
+	zip -yr SideStore.ipa Payload
 	rm -rf Payload*/
 
 # Global Variables
@@ -372,7 +372,7 @@ ipa-sidebackup: checkPaths copy-sidebackup
 	@mkdir -p 	"$(ALT_APP_PAYLOAD_DST)/$(TARGET_NAME)"
 	@echo " Copying from $(ALT_APP_SRC) into $(ALT_APP_PAYLOAD_DST)"
 	@cp -R -f	"$(ALT_APP_SRC)/." "$(ALT_APP_PAYLOAD_DST)/$(TARGET_NAME)"
-	@pushd 		"$(ALT_APP_DST_ARCHIVE)" && zip -r "../../$(ALT_APP_IPA_DST)" Payload || popd
+	@pushd 		"$(ALT_APP_DST_ARCHIVE)" && zip -yr "../../$(ALT_APP_IPA_DST)" Payload || popd
 	@echo "  IPA created: build/SideBackup.ipa"
 
 clean-sidebackup:

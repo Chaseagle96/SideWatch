@@ -65,6 +65,8 @@ extension OperationError
 
         case invalidOperationContext
         case sideStoreBundleIDMismatch
+        case watchDeviceRegistrationRequired
+        case watchProfileMissingDevice
     }
     
     static var cancelled: CancellationError { CancellationError() }
@@ -176,6 +178,14 @@ extension OperationError
     
     static func invalidOperationContext(_ message: String? = nil) -> OperationError {
         OperationError(code: .invalidOperationContext, failureReason: message)
+    }
+
+    static func watchDeviceRegistrationRequired(_ message: String? = nil) -> OperationError {
+        OperationError(code: .watchDeviceRegistrationRequired, failureReason: message)
+    }
+
+    static func watchProfileMissingDevice(_ message: String? = nil) -> OperationError {
+        OperationError(code: .watchProfileMissingDevice, failureReason: message)
     }
     
     static func forbidden(failureReason: String? = nil, file: String = #fileID, line: UInt = #line) -> OperationError {
@@ -318,6 +328,10 @@ struct OperationError: ALTLocalizedError {
         case .sideStoreBundleIDMismatch:
             let message = self._failureReason ?? ""
             return String(format: NSLocalizedString("Bundle ID Mismatch: %@", comment: ""), message)
+        case .watchDeviceRegistrationRequired:
+            return self._failureReason ?? NSLocalizedString("A Watch app was found, but no Apple Watch is registered on this developer team. Register the paired Watch with Xcode or the Apple Developer portal before signing this app.", comment: "")
+        case .watchProfileMissingDevice:
+            return self._failureReason ?? NSLocalizedString("The generated watchOS provisioning profile does not contain any registered Apple Watch for this developer team.", comment: "")
         case .serverNotFound: return NSLocalizedString("AltServer could not be found.", comment: "")
         case .connectionFailed: return NSLocalizedString("A connection to AltServer could not be established.", comment: "")
         case .connectionDropped: return NSLocalizedString("The connection to AltServer was dropped.", comment: "")
@@ -374,6 +388,9 @@ struct OperationError: ALTLocalizedError {
             message += String(format: NSLocalizedString("You can register another App ID in %@.", comment: ""), remainingTime)
 
             return message
+
+        case .watchDeviceRegistrationRequired, .watchProfileMissingDevice:
+            return NSLocalizedString("Pair the Watch with this iPhone, enable Developer Mode, and register that Watch on the same Apple developer team before retrying.", comment: "")
             
         default: return nil
         }

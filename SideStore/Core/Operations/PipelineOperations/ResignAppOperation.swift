@@ -16,7 +16,7 @@ final class ResignAppOperation: BasePipelineOperation<InstallAppOperationContext
         debugLog("[ResignAppOperation] execute() started")
         defer { debugLog("[ResignAppOperation] execute() completed") }
         try await super.executePreconditionCheck(parentProgress: parentProgress)
-        
+
         guard
             let appBundle = self.context.targetAppBundle,
             let profiles = self.context.provisioningProfiles,
@@ -28,7 +28,7 @@ final class ResignAppOperation: BasePipelineOperation<InstallAppOperationContext
                                                    "self.context.provisioningProfiles or " +
                                                    "self.context.authenticatedContext.signingCertificate is nil")
         }
-        
+
         debugLog("[ResignAppOperation] Resigning app \(self.context.bundleIdentifier)...")
         
         self.setProgress(5)
@@ -65,16 +65,12 @@ final class ResignAppOperation: BasePipelineOperation<InstallAppOperationContext
     private func prepareAppBundle(for targetAppBundle: ALTApplication, profiles: [String: ALTProvisioningProfile], appexBundleIds: [String: String]) async throws -> URL {
 
         let bundleIdentifier = context.targetBundleIdentifier
-        let finalBundleIdentifier: String
-        // The profile dictionary also contains watchOS profiles. Never use an
-        // arbitrary dictionary value for the root app: Swift dictionary order
-        // is unspecified, and a watch profile would produce an iOS URL scheme
-        // and destination bundle ID.
-        if let profile = profiles[bundleIdentifier] ?? (context.useMainProfile ? profiles.values.first : nil) {
-            finalBundleIdentifier = profile.bundleIdentifier
-        } else {
-            finalBundleIdentifier = bundleIdentifier
+        guard let rootProfile = profiles[bundleIdentifier] else {
+            throw OperationError.invalidParameters(
+                "The root application has no exact provisioning profile for '\(bundleIdentifier)'."
+            )
         }
+        let finalBundleIdentifier = rootProfile.bundleIdentifier
         
         // Use customized bundle ID if applicable
         let openURL = InstalledApp.openAppURL(for: AnyApp(from: targetAppBundle, bundleId: finalBundleIdentifier))
@@ -124,127 +120,91 @@ final class ResignAppOperation: BasePipelineOperation<InstallAppOperationContext
             additionalValues[Bundle.Info.serverID] = UserDefaults.standard.preferredServerID
         }
         
-        // Prepare app
-        try self.prepare(appBundle, bundleID: bundleIdentifier, additionalInfoDictionaryValues: additionalValues, profiles: profiles, appexBundleIds: appexBundleIds)
-        try self.prepareEmbeddedBundles(
-            in: appBundle,
-            originalRootBundleIdentifier: targetAppBundle.bundleIdentifier,
-            effectiveRootBundleIdentifier: bundleIdentifier,
+        let identifierMapping = ALTBundleIdentifierMapping(
+            originalRootIdentifier: targetAppBundle.bundleIdentifier,
+            mappedRootIdentifier: bundleIdentifier
+        )
+        var relationshipIdentifiers = [
+            targetAppBundle.bundleIdentifier: rootProfile.bundleIdentifier
+        ]
+        for node in targetAppBundle.signedBundleGraph.signingOrder
+            where node.requiresProvisioningProfile && !node.relativePath.isEmpty {
+            guard let originalIdentifier = node.bundleIdentifier else {
+                throw OperationError.invalidParameters(
+                    "Provisioned bundle at '\(node.relativePath)' has no CFBundleIdentifier."
+                )
+            }
+            let effectiveIdentifier = identifierMapping.mappedIdentifier(for: originalIdentifier)
+            guard let profile = profiles[effectiveIdentifier] else {
+                throw OperationError.invalidParameters(
+                    "No exact provisioning profile exists for '\(originalIdentifier)' (mapped as '\(effectiveIdentifier)')."
+                )
+            }
+            relationshipIdentifiers[originalIdentifier] =
+                appexBundleIds[effectiveIdentifier] ?? profile.bundleIdentifier
+        }
+        try self.prepare(
+            appBundle,
+            originalBundleIdentifier: targetAppBundle.bundleIdentifier,
+            bundleID: bundleIdentifier,
+            additionalInfoDictionaryValues: additionalValues,
             profiles: profiles,
             appexBundleIds: appexBundleIds,
-            includeWatchApplications: true
+            relationshipIdentifiers: relationshipIdentifiers
         )
+
+        // Traverse the source graph by relative path so every nested
+        // application/extension is rewritten exactly once, regardless of how
+        // deeply it is nested under PlugIns, Watch, or WatchKit.
+        let embeddedNodes = targetAppBundle.signedBundleGraph.signingOrder
+            .filter { $0.requiresProvisioningProfile && !$0.relativePath.isEmpty }
+        for node in embeddedNodes {
+            guard let originalIdentifier = node.bundleIdentifier else {
+                throw OperationError.invalidParameters(
+                    "Provisioned bundle at '\(node.relativePath)' has no CFBundleIdentifier."
+                )
+            }
+            let copiedURL = appBundleURL.appendingPathComponent(node.relativePath)
+            guard let copiedBundle = Bundle(url: copiedURL) else {
+                throw OperationError.invalidParameters(
+                    "Nested bundle '\(node.relativePath)' disappeared while staging the app."
+                )
+            }
+            let effectiveIdentifier = identifierMapping.mappedIdentifier(for: originalIdentifier)
+            try self.prepare(
+                copiedBundle,
+                originalBundleIdentifier: originalIdentifier,
+                bundleID: effectiveIdentifier,
+                profiles: profiles,
+                appexBundleIds: appexBundleIds,
+                relationshipIdentifiers: relationshipIdentifiers
+            )
+        }
+
+        try self.validateWatchRelationships(in: appBundleURL)
         try self.removeMissingAppExtensionReferences(from: appBundle)
-        
+
         return appBundleURL
     }
 
-    /// Rewrites and prepares every nested bundle that will be signed. The
-    /// standard iOS path is `PlugIns/*.appex`; a WatchKit companion lives in
-    /// `Watch/*.app` and has its own nested `PlugIns/*.appex` directory.
-    private func prepareEmbeddedBundles(
-        in parentBundle: Bundle,
-        originalRootBundleIdentifier: String,
-        effectiveRootBundleIdentifier: String,
+    private func prepare(
+        _ bundle: Bundle,
+        originalBundleIdentifier: String,
+        bundleID identifier: String,
+        additionalInfoDictionaryValues: [String: Any] = [:],
         profiles: [String: ALTProvisioningProfile],
         appexBundleIds: [String: String],
-        includeWatchApplications: Bool
+        relationshipIdentifiers: [String: String]
     ) throws {
-        let fileManager = FileManager.default
-
-        if let directory = parentBundle.builtInPlugInsURL,
-           let urls = try? fileManager.contentsOfDirectory(
-               at: directory,
-               includingPropertiesForKeys: [.isDirectoryKey],
-               options: [.skipsHiddenFiles]
-           ) {
-            for fileURL in urls.sorted(by: { $0.path < $1.path }) {
-                #if DEBUG
-                if fileURL.lastPathComponent.lowercased().contains(".xctest") {
-                    try fileManager.removeItem(at: fileURL)
-                    continue
-                }
-                #endif
-
-                guard fileURL.pathExtension.caseInsensitiveCompare("appex") == .orderedSame,
-                      let appExtension = Bundle(url: fileURL),
-                      let originalBundleID = appExtension.bundleIdentifier else {
-                    continue
-                }
-
-                let effectiveBundleID = Self.effectiveBundleIdentifier(
-                    originalBundleID,
-                    originalRootBundleIdentifier: originalRootBundleIdentifier,
-                    effectiveRootBundleIdentifier: effectiveRootBundleIdentifier
-                )
-                try self.prepare(appExtension, bundleID: effectiveBundleID, profiles: profiles, appexBundleIds: appexBundleIds)
-                try self.prepareEmbeddedBundles(
-                    in: appExtension,
-                    originalRootBundleIdentifier: originalRootBundleIdentifier,
-                    effectiveRootBundleIdentifier: effectiveRootBundleIdentifier,
-                    profiles: profiles,
-                    appexBundleIds: appexBundleIds,
-                    includeWatchApplications: false
-                )
-            }
-        }
-
-        guard includeWatchApplications,
-              let rootApplication = ALTApplication(fileURL: parentBundle.bundleURL) else {
-            return
-        }
-
-        for watchApplication in rootApplication.watchApplications.sorted(by: { $0.fileURL.path < $1.fileURL.path }) {
-            guard let watchBundle = Bundle(url: watchApplication.fileURL) else {
-                throw ALTError(.missingAppBundle)
-            }
-
-            let effectiveBundleID = Self.effectiveBundleIdentifier(
-                watchApplication.bundleIdentifier,
-                originalRootBundleIdentifier: originalRootBundleIdentifier,
-                effectiveRootBundleIdentifier: effectiveRootBundleIdentifier
-            )
-            try self.prepare(watchBundle, bundleID: effectiveBundleID, profiles: profiles, appexBundleIds: appexBundleIds)
-            try self.prepareEmbeddedBundles(
-                in: watchBundle,
-                originalRootBundleIdentifier: originalRootBundleIdentifier,
-                effectiveRootBundleIdentifier: effectiveRootBundleIdentifier,
-                profiles: profiles,
-                appexBundleIds: appexBundleIds,
-                includeWatchApplications: false
-            )
-        }
-    }
-
-    private static func effectiveBundleIdentifier(
-        _ originalIdentifier: String,
-        originalRootBundleIdentifier: String,
-        effectiveRootBundleIdentifier: String
-    ) -> String {
-        guard originalIdentifier != originalRootBundleIdentifier,
-              originalIdentifier.hasPrefix(originalRootBundleIdentifier + ".") else {
-            return originalIdentifier == originalRootBundleIdentifier ? effectiveRootBundleIdentifier : originalIdentifier
-        }
-
-        return effectiveRootBundleIdentifier + String(originalIdentifier.dropFirst(originalRootBundleIdentifier.count))
-    }
-    
-    private func prepare(_ bundle: Bundle, bundleID identifier: String?, additionalInfoDictionaryValues: [String: Any] = [:], profiles: [String: ALTProvisioningProfile], appexBundleIds: [String: String]) throws {
-        guard let identifier else {
-            throw ALTError(.missingAppBundle)
-        }
         let isWatchOSBundle = (bundle.infoDictionary?["CFBundleSupportedPlatforms"] as? [String])?.contains {
             $0.caseInsensitiveCompare("WatchOS") == .orderedSame
         } == true || (bundle.infoDictionary?["DTPlatformName"] as? String)?.caseInsensitiveCompare("watchos") == .orderedSame
             || (bundle.infoDictionary?["UIDeviceFamily"] as? [NSNumber])?.contains { $0.intValue == 4 } == true
 
-        let profile = profiles[identifier] ?? (
-            context.useMainProfile && !isWatchOSBundle
-                ? profiles[context.targetBundleIdentifier]
-                : nil
-        )
-        guard let profile else {
-            throw ALTError(.missingProvisioningProfile)
+        guard let profile = profiles[identifier] else {
+            throw OperationError.invalidParameters(
+                "No exact provisioning profile exists for '\(originalBundleIdentifier)' (mapped as '\(identifier)')."
+            )
         }
         guard var infoDictionary = bundle.completeInfoDictionary else {
             throw ALTError(.missingInfoPlist)
@@ -256,21 +216,10 @@ final class ResignAppOperation: BasePipelineOperation<InstallAppOperationContext
             infoDictionary[kCFBundleIdentifierKey as String] = profile.bundleIdentifier
         }
 
-        func rewrittenBundleIdentifier(for originalIdentifier: String) -> String {
-            let effectiveIdentifier = Self.effectiveBundleIdentifier(
-                originalIdentifier,
-                originalRootBundleIdentifier: context.bundleIdentifier,
-                effectiveRootBundleIdentifier: context.targetBundleIdentifier
-            )
-
-            if effectiveIdentifier == context.targetBundleIdentifier {
-                return profiles[context.targetBundleIdentifier]?.bundleIdentifier ?? effectiveIdentifier
-            }
-
-            return appexBundleIds[effectiveIdentifier] ?? effectiveIdentifier
-        }
-
         infoDictionary[Bundle.Info.altBundleID] = identifier
+        if infoDictionary[Bundle.Info.originalBundleID] == nil {
+            infoDictionary[Bundle.Info.originalBundleID] = originalBundleIdentifier
+        }
         infoDictionary[Bundle.Info.devicePairingString] = "<insert pairing file here>"
         infoDictionary.removeValue(forKey: "DTXcode")
         infoDictionary.removeValue(forKey: "DTXcodeBuild")
@@ -289,18 +238,12 @@ final class ResignAppOperation: BasePipelineOperation<InstallAppOperationContext
                 infoDictionary["CFBundleExecutable"] = executableName
             }
 
-            if let companionBundleIdentifier = infoDictionary["WKCompanionAppBundleIdentifier"] as? String {
-                infoDictionary["WKCompanionAppBundleIdentifier"] = rewrittenBundleIdentifier(for: companionBundleIdentifier)
-            }
-
-            if var extensionInfo = infoDictionary["NSExtension"] as? [String: Any],
-               var extensionAttributes = extensionInfo["NSExtensionAttributes"] as? [String: Any],
-               let watchAppBundleIdentifier = extensionAttributes["WKAppBundleIdentifier"] as? String {
-                extensionAttributes["WKAppBundleIdentifier"] = rewrittenBundleIdentifier(for: watchAppBundleIdentifier)
-                extensionInfo["NSExtensionAttributes"] = extensionAttributes
-                infoDictionary["NSExtension"] = extensionInfo
-            }
         }
+
+        infoDictionary = try ALTBundleRelationshipRewriter.rewrite(
+            infoDictionary,
+            identifiers: relationshipIdentifiers
+        )
 
         for (key, value) in additionalInfoDictionaryValues {
             infoDictionary[key] = value
@@ -337,6 +280,31 @@ final class ResignAppOperation: BasePipelineOperation<InstallAppOperationContext
         if FileManager.default.fileExists(atPath: codeSignaturePath) {
             try FileManager.default.removeItem(atPath: codeSignaturePath)
             self.verboseLog("[ResignAppOperation] Removed _CodeSignature folder at \(codeSignaturePath)")
+        }
+    }
+
+    private func validateWatchRelationships(in rootURL: URL) throws {
+        guard let rootApplication = ALTApplication(fileURL: rootURL) else {
+            throw OperationError.invalidApp
+        }
+        for watchApplication in rootApplication.watchApplications {
+            let companionIdentifier = watchApplication.bundle.infoDictionary?["WKCompanionAppBundleIdentifier"] as? String
+            guard companionIdentifier == rootApplication.bundleIdentifier else {
+                throw OperationError.invalidParameters(
+                    "Watch app '\(watchApplication.bundleIdentifier)' references companion '\(companionIdentifier ?? "missing")' instead of '\(rootApplication.bundleIdentifier)'."
+                )
+            }
+
+            for watchExtension in watchApplication.appExtensions {
+                let extensionInfo = watchExtension.bundle.infoDictionary?["NSExtension"] as? [String: Any]
+                let attributes = extensionInfo?["NSExtensionAttributes"] as? [String: Any]
+                let declaredWatchApp = attributes?["WKAppBundleIdentifier"] as? String
+                guard declaredWatchApp == watchApplication.bundleIdentifier else {
+                    throw OperationError.invalidParameters(
+                        "Watch extension '\(watchExtension.bundleIdentifier)' references Watch app '\(declaredWatchApp ?? "missing")' instead of '\(watchApplication.bundleIdentifier)'."
+                    )
+                }
+            }
         }
     }
 

@@ -1,4 +1,24 @@
-# SideStore
+# SideWatch
+
+SideWatch is an experimental SideStore fork that models, provisions, rewrites,
+and signs the complete nested bundle hierarchy of an IPA, including Apple Watch
+companion applications and WatchKit extensions.
+
+> **Artifact warning:** the macOS CI workflow intentionally builds with Xcode
+> code signing disabled and applies only ldid development/fake signatures. Its
+> `SideWatch-Unsigned.ipa` artifact is input for a legitimate installer such as
+> AltServer to re-sign with a certificate and device provisioning profiles. It
+> is not a directly installable IPA. Direct installation of that raw artifact
+> must fail Apple application verification because it has no embedded device
+> profiles and no valid enclosing resource seals.
+
+Watch signing additionally requires the paired Apple Watch to be registered on
+the same Apple developer team. SideWatch now stops with a specific diagnostic
+when no registered Watch exists or the generated watchOS profile omits it.
+
+See [the signing architecture](docs/SIDEWATCH_SIGNING_ARCHITECTURE.md) for the
+bundle graph, validation rules, build classifications, and current verification
+boundary.
 
 > SideStore is an *untethered, community driven* alternative app store for non-jailbroken iOS devices 
 
@@ -17,11 +37,12 @@ SideStore's goal is to provide an untethered sideloading experience. It's a comm
 (Contributions are welcome! 🙂)
 
 ## Requirements
-- Xcode 15
-- iOS 14+
+- Xcode 26.4 for the current branch
+- iOS 15+
 - Rustup (`brew install rustup`)
 
-Why iOS 14? Targeting such a recent version of iOS allows us to accelerate development, especially since not many developers have older devices to test on. This is corrobated by the fact that SwiftUI support is much better, allowing us to transistion to a more modern UI codebase.
+Why iOS 15? Targeting a newer iOS release allows the project to use the SwiftUI
+and concurrency APIs on which the current SideStore pipeline depends.
 ## Project Overview
 
 ### SideStore

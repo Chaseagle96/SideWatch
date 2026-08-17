@@ -61,7 +61,13 @@ final class RefreshAppOperation: BasePipelineOperation<InstallAppOperationContex
         }
 
         for installedExtension in installedApp.appExtensions {
-            guard let provisioningProfile = profiles[installedExtension.bundleIdentifier] else { continue }
+            guard let provisioningProfile = profiles.values.first(where: {
+                $0.bundleIdentifier == installedExtension.resignedBundleIdentifier
+            }) else {
+                throw OperationError.invalidParameters(
+                    "Refresh produced no profile for nested component '\(installedExtension.bundleIdentifier)' (resigned as '\(installedExtension.resignedBundleIdentifier)')."
+                )
+            }
             installedExtension.update(provisioningProfile: provisioningProfile)
         }
         return installedApp

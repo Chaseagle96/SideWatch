@@ -7,6 +7,7 @@
 //
 
 import Foundation
+@preconcurrency import AltSign
 
 struct PipelineExecutionStep: Hashable {
     let step: PipelineStep
@@ -79,6 +80,25 @@ struct PipelineStepDefinition {
         PipelineExecutionStep(.verifyCertificate,                10),
         PipelineExecutionStep(.fetchProvisioningProfilesRefresh, 45),
         PipelineExecutionStep(.refreshApp,                       40)
+    ]
+
+    /// Installing a renewed profile on the phone does not replace the profile
+    /// embedded in a Watch app or reseal its containing application. A
+    /// Watch-bearing refresh therefore performs a complete deterministic
+    /// re-sign and reinstall from the cached original application bundle.
+    static let watchRefresh: [PipelineExecutionStep] = [
+        PipelineExecutionStep(.stageApp,                          3),
+        PipelineExecutionStep(.updateAppCertificate,              5),
+        PipelineExecutionStep(.verifyCertificate,                 5),
+        PipelineExecutionStep(.fetchProvisioningProfilesRefresh, 15),
+        PipelineExecutionStep(.prepareAppExtensionBundleIDs,      2),
+        PipelineExecutionStep(.embedSigningCert,                  1),
+        PipelineExecutionStep(.resignApp,                        18),
+        PipelineExecutionStep(.exportResignedApp,                 2),
+        PipelineExecutionStep(.sendApp,                          20),
+        PipelineExecutionStep(.cacheSigningCert,                  1),
+        PipelineExecutionStep(.installApp,                       26),
+        PipelineExecutionStep(.cleanStagedApp,                    2)
     ]
 
     static let activateLegacy: [PipelineExecutionStep] = [
@@ -245,8 +265,10 @@ struct PipelineStepDefinition {
             return install
         case .resign:
             return resign
-        case .refresh:
-            return refresh
+        case .refresh(let installedApp):
+            let containsWatchApp = ALTApplication(fileURL: installedApp.fileURL)?
+                .watchApplications.isEmpty == false
+            return containsWatchApp ? watchRefresh : refresh
         case .activate:
             return UserDefaults.standard.isLegacyDeactivationSupported ? activateLegacy : activate
         case .deactivate:

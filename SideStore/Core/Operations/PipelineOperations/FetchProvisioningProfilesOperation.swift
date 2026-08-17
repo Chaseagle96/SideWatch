@@ -43,77 +43,43 @@ class FetchProvisioningProfilesOperation: BasePipelineOperation<InstallAppOperat
         self.debugLog("[FetchProvisioningProfiles] Main profile prepared successfully for \(effectiveBundleId), expiration: \(String(describing: profile.expirationDate))")
         
         var profiles = [effectiveBundleId: profile]
+        let effectiveMapping = ALTBundleIdentifierMapping(
+            originalRootIdentifier: targetAppBundle.bundleIdentifier,
+            mappedRootIdentifier: effectiveBundleId
+        )
+        let provisionedMapping = ALTBundleIdentifierMapping(
+            originalRootIdentifier: targetAppBundle.bundleIdentifier,
+            mappedRootIdentifier: profile.bundleIdentifier
+        )
 
-        let originalRootBundleID = targetAppBundle.bundleIdentifier
-        let effectiveBundleIdentifier: (String) -> String = { originalIdentifier in
-            guard originalIdentifier != originalRootBundleID,
-                  originalIdentifier.hasPrefix(originalRootBundleID + ".") else {
-                return originalIdentifier == originalRootBundleID ? effectiveBundleId : originalIdentifier
-            }
-
-            return effectiveBundleId + String(originalIdentifier.dropFirst(originalRootBundleID.count))
+        // Every application/extension node receives an exact App ID and
+        // profile. Sharing the root profile by rewriting multiple components
+        // to one identifier creates duplicate bundle IDs and is not safe.
+        let embeddedApplications = Array(targetAppBundle.provisioningApplications.dropFirst())
+        if context.useMainProfile && !embeddedApplications.isEmpty {
+            self.debugLog("[FetchProvisioningProfiles] Ignoring useMainProfile because nested bundles require unique App IDs and profiles.")
+            context.useMainProfile = false
         }
 
-        // Ordinary iOS extensions may reuse the parent profile when the user
-        // selected that optimization. WatchKit bundles may never do so:
-        // Apple requires separate watchOS App IDs and profiles.
-        let iosExtensions = targetAppBundle.appExtensions.sorted { $0.fileURL.path < $1.fileURL.path }
-        if !self.context.useMainProfile {
-            for appExtension in iosExtensions {
-                self.verboseLog("[FetchProvisioningProfiles] Preparing iOS extension profile for \(appExtension.bundleIdentifier)...")
-                let extProfile = try await self.prepareProvisioningProfile(
-                    for: appExtension,
-                    parentAppBundle: targetAppBundle,
-                    team: team,
-                    session: session,
-                    parentProfileBundleIdentifier: profile.bundleIdentifier
-                )
-                let updatedExtensionBundleID = effectiveBundleIdentifier(appExtension.bundleIdentifier)
-                profiles[updatedExtensionBundleID] = extProfile
-                self.verboseLog("[FetchProvisioningProfiles] iOS extension profile prepared for \(updatedExtensionBundleID)")
-            }
-        } else if !iosExtensions.isEmpty {
-            self.debugLog("[FetchProvisioningProfiles] Reusing the main iOS profile for \(iosExtensions.count) ordinary extension(s).")
-        }
-
-        let watchApplications = targetAppBundle.watchApplications.sorted { $0.fileURL.path < $1.fileURL.path }
-        let watchBundleCount = watchApplications.reduce(0) { $0 + 1 + $1.appExtensions.count }
-        let totalProfileWork = max(1, iosExtensions.count + watchBundleCount)
-        var completedProfileWork = 0
-
-        // Xcode embeds each WatchKit application under Watch/*.app. Fetch a
-        // watchOS profile for the Watch app and every nested WatchKit
-        // extension, using the parent's generated bundle ID for nested IDs.
-        for watchApplication in watchApplications {
-            self.verboseLog("[FetchProvisioningProfiles] Preparing watchOS application profile for \(watchApplication.bundleIdentifier)...")
-            let watchProfile = try await self.prepareProvisioningProfile(
-                for: watchApplication,
+        for (index, embeddedApplication) in embeddedApplications.enumerated() {
+            let effectiveIdentifier = effectiveMapping.mappedIdentifier(
+                for: embeddedApplication.bundleIdentifier
+            )
+            let provisionedIdentifier = provisionedMapping.mappedIdentifier(
+                for: embeddedApplication.bundleIdentifier
+            )
+            self.verboseLog(
+                "[FetchProvisioningProfiles] Preparing \(embeddedApplication.isWatchOSBundle ? "watchOS" : "iOS") profile for \(embeddedApplication.bundleIdentifier) as \(provisionedIdentifier)..."
+            )
+            let embeddedProfile = try await self.prepareProvisioningProfile(
+                for: embeddedApplication,
                 parentAppBundle: targetAppBundle,
                 team: team,
                 session: session,
-                parentProfileBundleIdentifier: profile.bundleIdentifier
+                mappedBundleIdentifier: provisionedIdentifier
             )
-            let updatedWatchBundleID = effectiveBundleIdentifier(watchApplication.bundleIdentifier)
-            profiles[updatedWatchBundleID] = watchProfile
-            completedProfileWork += 1
-            self.debugLog("[FetchProvisioningProfiles] watchOS application profile prepared for \(updatedWatchBundleID)")
-            self.setProgress(50 + Int64(Double(completedProfileWork) / Double(totalProfileWork) * 50.0))
-
-            for watchExtension in watchApplication.appExtensions.sorted(by: { $0.fileURL.path < $1.fileURL.path }) {
-                self.verboseLog("[FetchProvisioningProfiles] Preparing WatchKit extension profile for \(watchExtension.bundleIdentifier)...")
-                let extensionProfile = try await self.prepareProvisioningProfile(
-                    for: watchExtension,
-                    parentAppBundle: watchApplication,
-                    team: team,
-                    session: session,
-                    parentProfileBundleIdentifier: watchProfile.bundleIdentifier
-                )
-                let updatedExtensionBundleID = effectiveBundleIdentifier(watchExtension.bundleIdentifier)
-                profiles[updatedExtensionBundleID] = extensionProfile
-                completedProfileWork += 1
-                self.debugLog("[FetchProvisioningProfiles] WatchKit extension profile prepared for \(updatedExtensionBundleID)")
-                self.setProgress(50 + Int64(Double(completedProfileWork) / Double(totalProfileWork) * 50.0))
-            }
+            profiles[effectiveIdentifier] = embeddedProfile
+            self.setProgress(50 + Int64(Double(index + 1) / Double(max(1, embeddedApplications.count)) * 50.0))
         }
 
         self.setProgress(100)
@@ -127,7 +93,33 @@ class FetchProvisioningProfilesOperation: BasePipelineOperation<InstallAppOperat
         verboseLog(targetAppBundle.dumpMachOInfo())
         debugLog("[FetchProvisioningProfiles] Fetching existing provisioning profile to get its identifier for App ID \(appID.bundleIdentifier).")
         let deviceType: ALTDeviceType = targetAppBundle.isWatchOSBundle ? .watch : .iphone
+        var registeredWatchDevices: [ALTDevice] = []
+        if targetAppBundle.isWatchOSBundle {
+            if let cached = context.sharedContext?.watchDevices {
+                registeredWatchDevices = cached
+            } else {
+                registeredWatchDevices = try await DeveloperPortalService.shared.fetchDevices(
+                    for: team,
+                    types: .watch,
+                    session: session
+                )
+                context.sharedContext?.watchDevices = registeredWatchDevices
+            }
+            guard !registeredWatchDevices.isEmpty else {
+                throw OperationError.watchDeviceRegistrationRequired(
+                    "Watch companion '\(targetAppBundle.bundleIdentifier)' was discovered, but this developer team has no registered Apple Watch."
+                )
+            }
+        }
         let profile = try await ALTAppleAPI.shared.fetchProvisioningProfile(for: appID, deviceType: deviceType, team: team, session: session)
+        if targetAppBundle.isWatchOSBundle {
+            let registeredIDs = Set(registeredWatchDevices.map(\.identifier))
+            guard !registeredIDs.isDisjoint(with: Set(profile.deviceIDs)) else {
+                throw OperationError.watchProfileMissingDevice(
+                    "watchOS profile '\(profile.name)' contains none of the registered Apple Watch device identifiers."
+                )
+            }
+        }
         return profile
     }
     
@@ -139,42 +131,36 @@ class FetchProvisioningProfilesOperation: BasePipelineOperation<InstallAppOperat
     }
     
     private func preferredBundleID(for targetAppBundle: ALTApplication, team: ALTTeam, in context: NSManagedObjectContext) -> String? {
-        // Check if we have already installed this app with this team before.
+        // Check if we have already installed this root app with this team.
         let predicate = NSPredicate(format: "%K == %@", #keyPath(InstalledApp.bundleIdentifier), targetAppBundle.bundleIdentifier)
-        guard let installedApp = InstalledApp.first(satisfying: predicate, in: context) else {
-            self.verboseLog("[FetchProvisioningProfiles] No existing InstalledApp found for bundleID: \(targetAppBundle.bundleIdentifier)")
+        if let installedApp = InstalledApp.first(satisfying: predicate, in: context) {
+            let teamsMatch = (installedApp.team?.identifier == team.identifier || installedApp.team == nil)
+                && installedApp.resignedBundleIdentifier.contains(team.identifier)
+            return teamsMatch ? installedApp.resignedBundleIdentifier : nil
+        }
+
+        // Nested iOS, Watch app, and Watch extension identifiers are stored as
+        // InstalledExtension rows. Looking only at InstalledApp caused refresh
+        // to allocate new IDs or accidentally reuse the root ID.
+        let extensionPredicate = NSPredicate(
+            format: "%K == %@",
+            #keyPath(InstalledExtension.bundleIdentifier),
+            targetAppBundle.bundleIdentifier
+        )
+        guard let installedExtension = InstalledExtension.first(satisfying: extensionPredicate, in: context),
+              let parent = installedExtension.parentApp else {
+            self.verboseLog("[FetchProvisioningProfiles] No installed component found for bundleID: \(targetAppBundle.bundleIdentifier)")
             return nil
         }
-        
-        // Teams match if installedApp.team has same identifier as team (or team is nil)
-        // AND installedApp.resignedBundleIdentifier actually contains the team's identifier.
-        let teamsMatch = (installedApp.team?.identifier == team.identifier || installedApp.team == nil)
-                         && installedApp.resignedBundleIdentifier.contains(team.identifier)
-        
-        self.verboseLog("[FetchProvisioningProfiles] preferredBundleID check: app=\(targetAppBundle.bundleIdentifier), installedResignedID=\(installedApp.resignedBundleIdentifier), installedTeam=\(installedApp.team?.identifier ?? "nil"), targetTeam=\(team.identifier), teamsMatch=\(teamsMatch)")
-
-        // TODO: @mahee96: Try to keep the debug build and release build operations similar, refactor later with proper reasoning
-        //                 for now, restricted it to debug on simulator only
-        #if DEBUG && targetEnvironment(simulator)
-
-        let result = teamsMatch ? installedApp.resignedBundleIdentifier : nil
-        self.debugLog("[FetchProvisioningProfiles] preferredBundleID result (DEBUG simulator): \(result ?? "nil")")
-        return result
-
-        #else
-        
-        let result = teamsMatch ? installedApp.resignedBundleIdentifier : nil
-        self.debugLog("[FetchProvisioningProfiles] preferredBundleID result: \(result ?? "nil")")
-        return result
-        
-        #endif
+        let teamsMatch = parent.team?.identifier == team.identifier || parent.team == nil
+        return teamsMatch ? installedExtension.resignedBundleIdentifier : nil
     }
     
     private func prepareProvisioningProfile(for targetAppBundle: ALTApplication,
                                     parentAppBundle: ALTApplication?,
                                     team: ALTTeam,
                                     session: ALTAppleAPISession,
-                                    parentProfileBundleIdentifier: String? = nil) async throws -> ALTProvisioningProfile {
+                                    mappedBundleIdentifier: String? = nil) async throws -> ALTProvisioningProfile {
         let preferredBundleID = try await self.fetchPreferredBundleID(for: targetAppBundle, team: team)
         
         let bundleID: String
@@ -182,10 +168,13 @@ class FetchProvisioningProfilesOperation: BasePipelineOperation<InstallAppOperat
         if let preferredBundleID = preferredBundleID {
             bundleID = preferredBundleID
             self.debugLog("[FetchProvisioningProfiles] Using preferredBundleID: \(bundleID)")
+        } else if let mappedBundleIdentifier {
+            bundleID = mappedBundleIdentifier
+            self.debugLog("[FetchProvisioningProfiles] Using deterministic mapped bundleID: \(bundleID)")
         } else {
             let parentBundleID = parentAppBundle?.bundleIdentifier ?? targetAppBundle.bundleIdentifier
             let effectiveParentBundleID = self.context.targetBundleIdentifier
-            let updatedParentBundleID = parentProfileBundleIdentifier ?? (effectiveParentBundleID + "." + team.identifier)
+            let updatedParentBundleID = effectiveParentBundleID + "." + team.identifier
 
             if parentAppBundle != nil,
                targetAppBundle.bundleIdentifier.hasPrefix(parentBundleID + ".") {

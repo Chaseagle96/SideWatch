@@ -17,6 +17,9 @@ public final class ALTApplication: NSObject {
 
     public let name: String
     public let bundleIdentifier: String
+    public var originalBundleIdentifier: String {
+        (bundle.infoDictionary?["ALTOriginalBundleIdentifier"] as? String) ?? bundleIdentifier
+    }
     public let version: String
     public let buildVersion: String
 
@@ -52,17 +55,27 @@ public final class ALTApplication: NSObject {
         loadWatchApplications()
     }
 
-    /// Every nested code bundle that requires its own App ID/profile. The
-    /// top-level iOS app itself is intentionally excluded.
+    /// The complete recursive nested-code graph. This includes provisioning
+    /// units as well as frameworks and dylibs that must be signed before their
+    /// enclosing bundle is sealed.
+    public var signedBundleGraph: ALTSignedBundleNode {
+        Self.makeSignedBundleNode(
+            application: self,
+            rootURL: fileURL,
+            kind: isWatchOSBundle ? .watchApplication : .iOSApplication
+        )
+    }
+
+    /// Every nested application or extension that requires its own App ID and
+    /// provisioning profile. The top-level application is excluded.
     public var allEmbeddedApplications: Set<ALTApplication> {
-        var result = appExtensions
+        let applications = signedBundleGraph.provisioningApplications.dropLast()
+        return Set(applications)
+    }
 
-        for watchApplication in watchApplications {
-            result.insert(watchApplication)
-            result.formUnion(watchApplication.appExtensions)
-        }
-
-        return result
+    /// Provisioning units in deterministic parent-before-child order.
+    public var provisioningApplications: [ALTApplication] {
+        Array(signedBundleGraph.provisioningApplications.reversed())
     }
 
     /// Whether this bundle is a watchOS app or WatchKit extension. Prefer
@@ -317,6 +330,125 @@ private extension ALTApplication {
 // MARK: - Extensions
 
 private extension ALTApplication {
+
+    static func makeSignedBundleNode(
+        application: ALTApplication,
+        rootURL: URL,
+        kind: ALTSignedBundleKind
+    ) -> ALTSignedBundleNode {
+        let childApplications = Array(application.appExtensions) + Array(application.watchApplications)
+        var children = childApplications
+            .sorted { $0.fileURL.path < $1.fileURL.path }
+            .map { child -> ALTSignedBundleNode in
+                let childKind: ALTSignedBundleKind
+                if child.fileURL.pathExtension.caseInsensitiveCompare("appex") == .orderedSame {
+                    childKind = child.isWatchOSBundle ? .watchExtension : .iOSExtension
+                } else if child.isWatchOSBundle {
+                    childKind = .watchApplication
+                } else {
+                    childKind = .embeddedApplication
+                }
+                return makeSignedBundleNode(
+                    application: child,
+                    rootURL: rootURL,
+                    kind: childKind
+                )
+            }
+
+        let applicationPlatform: ALTBundlePlatform = application.isWatchOSBundle ? .watchOS : .iOS
+        children.append(contentsOf: embeddedCodeNodes(
+            in: application.fileURL,
+            rootURL: rootURL,
+            fallbackPlatform: applicationPlatform
+        ))
+
+        let relativePath = application.fileURL == rootURL
+            ? ""
+            : application.fileURL.path.replacingOccurrences(of: rootURL.path + "/", with: "")
+        return ALTSignedBundleNode(
+            fileURL: application.fileURL,
+            relativePath: relativePath,
+            kind: kind,
+            platform: application.isWatchOSBundle ? .watchOS : .iOS,
+            bundleIdentifier: application.bundleIdentifier,
+            application: application,
+            children: children.sorted { $0.relativePath < $1.relativePath }
+        )
+    }
+
+    static func platform(for info: [String: Any]?, fallback isWatchOS: Bool) -> ALTBundlePlatform {
+        if let platforms = info?["CFBundleSupportedPlatforms"] as? [String],
+           platforms.contains(where: { $0.caseInsensitiveCompare("WatchOS") == .orderedSame }) {
+            return .watchOS
+        }
+        if let platforms = info?["CFBundleSupportedPlatforms"] as? [String],
+           platforms.contains(where: { $0.caseInsensitiveCompare("iPhoneOS") == .orderedSame }) {
+            return .iOS
+        }
+        return isWatchOS ? .watchOS : .unknown
+    }
+
+    static func embeddedCodeNodes(
+        in containerURL: URL,
+        rootURL: URL,
+        fallbackPlatform: ALTBundlePlatform
+    ) -> [ALTSignedBundleNode] {
+        let frameworksURL = containerURL.appendingPathComponent("Frameworks", isDirectory: true)
+        guard let frameworkItems = try? FileManager.default.contentsOfDirectory(
+            at: frameworksURL,
+            includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+
+        return frameworkItems.sorted(by: { $0.path < $1.path }).compactMap { item in
+            guard let values = try? item.resourceValues(
+                forKeys: [.isDirectoryKey, .isSymbolicLinkKey]
+            ), values.isSymbolicLink != true else {
+                return nil
+            }
+
+            let relativePath = item.path.replacingOccurrences(of: rootURL.path + "/", with: "")
+            if item.pathExtension.caseInsensitiveCompare("framework") == .orderedSame,
+               values.isDirectory == true {
+                let bundle = Bundle(url: item)
+                let discoveredPlatform = platform(
+                    for: bundle?.infoDictionary,
+                    fallback: fallbackPlatform == .watchOS
+                )
+                let effectivePlatform = discoveredPlatform == .unknown
+                    ? fallbackPlatform
+                    : discoveredPlatform
+                return ALTSignedBundleNode(
+                    fileURL: item,
+                    relativePath: relativePath,
+                    kind: .framework,
+                    platform: effectivePlatform,
+                    bundleIdentifier: bundle?.bundleIdentifier,
+                    application: nil,
+                    children: embeddedCodeNodes(
+                        in: item,
+                        rootURL: rootURL,
+                        fallbackPlatform: effectivePlatform
+                    )
+                )
+            }
+            if item.pathExtension.caseInsensitiveCompare("dylib") == .orderedSame,
+               values.isDirectory != true {
+                return ALTSignedBundleNode(
+                    fileURL: item,
+                    relativePath: relativePath,
+                    kind: .dynamicLibrary,
+                    platform: fallbackPlatform,
+                    bundleIdentifier: nil,
+                    application: nil,
+                    children: []
+                )
+            }
+            return nil
+        }
+    }
 
     func loadExtensions() -> Set<ALTApplication> {
 

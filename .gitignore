@@ -72,9 +72,13 @@ local-build.sh
 source-metadata.json
 release-notes.md
 *.md
+!docs/SIDEWATCH_SIGNING_ARCHITECTURE.md
+!docs/SIDEWATCH_FORENSIC_AUDIT.md
 *.log
 *.pdf
 *.txt
+**/__pycache__/
+*.pyc
 
 Dependencies/minimuxer-*/
 .test/

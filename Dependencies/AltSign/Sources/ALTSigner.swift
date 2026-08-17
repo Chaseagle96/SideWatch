@@ -77,23 +77,7 @@ private extension ALTSigner {
         debugLog("[AltSign] ALTSigner.performSigning started for app: \(application.bundleIdentifier)")
 
         func profile(for app: ALTApplication) -> ALTProvisioningProfile? {
-            if let exactProfile = profiles.first(where: { $0.bundleIdentifier == app.bundleIdentifier }) {
-                return exactProfile
-            }
-
-            // A user may elect to reuse the main iOS profile for ordinary
-            // app extensions. Never apply that fallback to a watchOS bundle:
-            // watchOS binaries require a watchOS profile and would otherwise
-            // produce an IPA that looks signed but cannot be installed.
-            guard !app.isWatchOSBundle else { return nil }
-
-            // If an ordinary extension was intentionally configured to use
-            // the main profile, the shortest available bundle ID is the
-            // parent application's profile. This is deterministic and avoids
-            // relying on Dictionary/Set iteration order.
-            return profiles.min { lhs, rhs in
-                lhs.bundleIdentifier.count < rhs.bundleIdentifier.count
-            }
+            profiles.first(where: { $0.bundleIdentifier == app.bundleIdentifier })
         }
 
         var entitlementsByURL: [URL: String] = [:]
@@ -109,6 +93,29 @@ private extension ALTSigner {
                 )
             }
 
+            guard profile.expirationDate > Date() else {
+                throw NSError(
+                    domain: AltSignErrorDomain,
+                    code: ALTError.invalidApp.rawValue,
+                    userInfo: [
+                        NSLocalizedFailureReasonErrorKey:
+                            "Provisioning profile '\(profile.name)' for '\(app.bundleIdentifier)' expired on \(profile.expirationDate)."
+                    ]
+                )
+            }
+            guard profile.certificates.contains(where: {
+                $0.serialNumber.caseInsensitiveCompare(certificate.serialNumber) == .orderedSame
+            }) else {
+                throw NSError(
+                    domain: AltSignErrorDomain,
+                    code: ALTError.invalidApp.rawValue,
+                    userInfo: [
+                        NSLocalizedFailureReasonErrorKey:
+                            "Signing certificate '\(certificate.serialNumber)' is not authorized by profile '\(profile.name)' for '\(app.bundleIdentifier)'."
+                    ]
+                )
+            }
+
             let profileURL =
                 app.fileURL.appendingPathComponent("embedded.mobileprovision")
 
@@ -116,34 +123,14 @@ private extension ALTSigner {
             try profile.data.write(to: profileURL)
 
             verboseLog("[AltSign] Original profile entitlements: \(profile.entitlements)")
-            let applicationEntitlements = app.entitlements
-            var filtered = profile.entitlements
-
-            for (key, _) in profile.entitlements {
-                if let applicationValue = applicationEntitlements[key] {
-                    if key == ALTEntitlementKeychainAccessGroups {
-                        guard let groups = applicationValue as? [String] else {
-                            verboseLog("The app's keychain-access-groups entitlement is not an array of strings.")
-                            continue
-                        }
-                        
-                        filtered[key] = try groups.map { group in
-                            guard let separator = group.firstIndex(of: ".") else {
-                                throw NSError(
-                                    domain: AltSignErrorDomain,
-                                    code: ALTError.invalidApp.rawValue,
-                                    userInfo: [NSLocalizedFailureReasonErrorKey: "The keychain access group '\(group)' does not contain a Team ID prefix."]
-                                )
-                            }
-                            
-                            return profile.teamIdentifier + group[separator...]
-                        }
-                    }
-                } else if key != ALTEntitlementApplicationIdentifier &&
-                            key != ALTEntitlementTeamIdentifier &&
-                            key != ALTEntitlementGetTaskAllow {
-                    filtered.removeValue(forKey: key)
-                }
+            let reconciliation = try ALTEntitlementReconciler.reconcile(
+                applicationEntitlements: app.entitlements,
+                profile: profile,
+                bundleIdentifier: app.bundleIdentifier
+            )
+            let filtered = reconciliation.entitlements
+            for diagnostic in reconciliation.diagnostics {
+                debugLog("[AltSign][Entitlements][\(app.bundleIdentifier)] \(diagnostic)")
             }
 
             verboseLog("[AltSign] Filtered entitlements for signing: \(filtered)")
@@ -170,10 +157,24 @@ private extension ALTSigner {
             ] = string
         }
 
-        try prepare(application)
+        let provisioningApplications = application.provisioningApplications
+        let duplicateIdentifiers = Dictionary(grouping: provisioningApplications, by: \.bundleIdentifier)
+            .filter { $0.value.count > 1 }
+            .keys
+            .sorted()
+        guard duplicateIdentifiers.isEmpty else {
+            throw NSError(
+                domain: AltSignErrorDomain,
+                code: ALTError.invalidApp.rawValue,
+                userInfo: [
+                    NSLocalizedFailureReasonErrorKey:
+                        "Multiple provisioned bundles use the same identifier: \(duplicateIdentifiers.joined(separator: ", "))."
+                ]
+            )
+        }
 
-        for embedded in application.allEmbeddedApplications.sorted(by: { $0.fileURL.path < $1.fileURL.path }) {
-            verboseLog("[AltSign] Found embedded bundle: \(embedded.bundleIdentifier) at \(embedded.fileURL.path) (watchOS: \(embedded.isWatchOSBundle))")
+        for embedded in provisioningApplications {
+            verboseLog("[AltSign] Preparing provisioning unit: \(embedded.bundleIdentifier) at \(embedded.fileURL.path) (watchOS: \(embedded.isWatchOSBundle))")
             try prepare(embedded)
         }
 
@@ -181,33 +182,9 @@ private extension ALTSigner {
 
         let keyData = try certificate.unencryptedP12Data()
 
-        // The bundled ldid implementation understands iOS app extensions,
-        // but older ldid releases do not discover the special
-        // `Watch/*.app` location used by Xcode for WatchKit companions. Sign
-        // each watch application as its own bundle first. Its nested
-        // WatchKit extension is then discovered through the normal
-        // `PlugIns/*.appex` traversal. The final parent-app signing pass still
-        // hashes the already-signed Watch directory as part of the iOS app's
-        // resource seal.
-        for watchApplication in application.watchApplications.sorted(by: { $0.fileURL.path < $1.fileURL.path }) {
-            verboseLog("[AltSign] Signing embedded watchOS application: \(watchApplication.fileURL.path)")
-            try LdidBridge.sign(
-                appPath: watchApplication.fileURL.path,
-                keyData: keyData,
-                entitlementProvider: { path in
-                    let url = path.isEmpty
-                        ? watchApplication.fileURL
-                        : watchApplication.fileURL.appendingPathComponent(path)
-                    let xml = entitlementsByURL[url.resolvingSymlinksInPath()] ?? ""
-                    verboseLog("[AltSign] Ldid watch entitlementProvider queried path: '\(path)', returning xml (length: \(xml.count))")
-                    return xml
-                },
-                progress: {
-                    progress.completedUnitCount += 1
-                }
-            )
-        }
-        
+        // ldid's bundle traversal includes PlugIns, Frameworks, Watch, and
+        // WatchKit. Its recursive Sign call is post-order, so the complete
+        // graph is signed deepest-first and the iOS root is sealed last.
         verboseLog("[AltSign] Invoking LdidBridge.sign for appPath: \(application.fileURL.path)")
         try LdidBridge.sign(
             appPath: application.fileURL.path,

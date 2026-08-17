@@ -248,6 +248,7 @@ final class SharedPipelineContext: @unchecked Sendable
     private let lock = NSLock()
     private var _appIDs: [ALTAppID]?
     private var _appGroups: [ALTAppGroup]?
+    private var _watchDevices: [ALTDevice]?
 
     var appIDs: [ALTAppID]? {
         get { lock.withLock { _appIDs } }
@@ -257,6 +258,11 @@ final class SharedPipelineContext: @unchecked Sendable
     var appGroups: [ALTAppGroup]? {
         get { lock.withLock { _appGroups } }
         set { lock.withLock { _appGroups = newValue } }
+    }
+
+    var watchDevices: [ALTDevice]? {
+        get { lock.withLock { _watchDevices } }
+        set { lock.withLock { _watchDevices = newValue } }
     }
 
     func appendAppID(_ appID: ALTAppID) {
