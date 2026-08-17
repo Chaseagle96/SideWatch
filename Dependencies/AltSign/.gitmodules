@@ -1,0 +1,9 @@
+[submodule "Dependencies/ldid"]
+	path = Dependencies/ldid
+	url = https://github.com/SideStore/ldid.git
+[submodule "Dependencies/OpenSSL"]
+	path = Dependencies/OpenSSL
+	url = https://github.com/krzyzanowskim/OpenSSL
+[submodule "Dependencies/minizip-ng"]
+	path = Dependencies/minizip-ng
+	url = https://github.com/zlib-ng/minizip-ng
