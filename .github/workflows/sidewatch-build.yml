@@ -50,7 +50,7 @@ jobs:
 
             rsync -a --delete \
               --exclude='.git/' \
-              --exclude='.github/workflows/sidewatch-build.yml' \
+              --exclude='.github/' \
               "$source_root/" ./
 
             rm -rf "$extract_dir" "$archive"
