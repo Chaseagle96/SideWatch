@@ -54,6 +54,20 @@ signed code but never receive application provisioning profiles.
     and reinstall path so the embedded Watch profiles and signatures are
     renewed as well.
 
+## Physical-device provisioning boundary
+
+Apple documents Apple Watch as its own registered device family and requires
+registered devices when generating development profiles. Apple's installation
+troubleshooting note specifically directs developers to add the phone and
+paired Watch UDIDs when diagnosing provisioning-profile installation failures.
+SideWatch therefore requests watchOS profiles for Watch application and
+extension nodes, rejects a team with no registered Watch, and verifies that a
+returned Watch profile contains a registered Watch identifier.
+
+- [Apple Developer: Devices overview](https://developer.apple.com/help/account/devices/devices-overview/)
+- [Apple Developer: Create a development provisioning profile](https://developer.apple.com/help/account/provisioning-profiles/create-a-development-provisioning-profile/)
+- [Apple Technical Note TN2319](https://developer.apple.com/library/archive/technotes/tn2319/)
+
 ## CI artifact classification
 
 The repository has no Apple signing identity, private key, registered device

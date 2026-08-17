@@ -1,5 +1,20 @@
 # SideWatch forensic baseline
 
+## Upstream fork point
+
+The imported source is based on SideStore's `develop` commit
+`e3f3a5b941ce657723a4939c89f2eea63bcfe263`. The source-transfer archive did
+not retain SideStore's `.git` directory, so this was established by comparing
+Git blob identities against that upstream tree: 574 of the 582 upstream files
+present in the import match byte-for-byte. The eight differing files are the
+pre-existing SideWatch edits in application discovery, provisioning, signing,
+installation persistence, and refresh. Vendored submodule contents account
+for most files that exist only in the import.
+
+The SideWatch repository imported that snapshot at
+`864e439d7f9e68f44717e84f97457357faef0521`. The failing artifact analyzed
+below was then built from `4ce8fdab2b5893940b45e3ddd37ebabecaaf5679`.
+
 ## Artifact inspected
 
 - GitHub Actions run: `32035318434` (run number 8)
@@ -37,6 +52,26 @@ are a different artifact and must be inspected separately.
 | Nested framework seals | valid | incomplete | FAIL |
 | Signed installability | recursive validation | invalid | FAIL |
 | Device installation | successful | no device evidence | NOT TESTED |
+
+## Representative Watch fixture
+
+`SkillingTime-Watch-Unsigned.ipa` was used as the real Watch-bearing structural
+fixture (SHA-256
+`7dec4f509496a3959764d5c96187a33475cb65f59d0a3eb89741c1a9cc32163c`).
+Recursive inspection found the following provisioned hierarchy and verified
+all original cross-bundle relationships:
+
+| Component | Platform | Bundle identifier | Relationship |
+|---|---|---|---|
+| Root app | iOS | `com.projectskillbook.app` | root |
+| Widget | iOS | `com.projectskillbook.app.SkillingTimeWidgets` | embedded iOS extension |
+| Watch app | watchOS | `com.projectskillbook.app.watchkitapp` | `WKCompanionAppBundleIdentifier` points to the root |
+| Watch extension | watchOS | `com.projectskillbook.app.watchkitapp.watchkitextension` | `WKAppBundleIdentifier` points to the Watch app |
+
+The fixture's executables are arm64 for iOS and arm64/arm64_32 for watchOS.
+It is intentionally unsigned, so it was suitable for discovery, mapping,
+relationship, archive, and signing-order validation but not for a
+credentialed installation claim.
 
 ## Architectural finding
 
