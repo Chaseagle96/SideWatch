@@ -532,7 +532,9 @@ public extension ALTAppleAPI {
             parameters["DTDK_Platform"] = "tvos"
             parameters["subPlatform"] = "tvOS"
         } else if deviceType.contains(.watch) {
-            parameters["DTDK_Platform"] = "watchos"
+            // Apple routes WatchKit provisioning through the iOS account
+            // platform. The Watch family is selected with subPlatform.
+            parameters["DTDK_Platform"] = "ios"
             parameters["subPlatform"] = "watchOS"
         }
         
