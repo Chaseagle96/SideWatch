@@ -79,7 +79,8 @@ jobs:
         run: |
           xcodebuild -version
           swift --version
-          ldid --help >/dev/null
+          command -v ldid
+          command -v xcbeautify
 
       - name: Build archive and IPA
         shell: bash
