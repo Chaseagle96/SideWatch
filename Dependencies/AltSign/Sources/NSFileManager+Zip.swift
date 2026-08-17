@@ -168,13 +168,22 @@ extension FileManager {
         let writer = try ZipBridge.Writer.create(at: ipaURL)
         writer.setCompressLevel(1) // Fast compression level for re-signing
 
-        let payloadRoot =
-            URL(fileURLWithPath: "Payload", isDirectory: true)
+        let payloadRoot = "Payload"
+        let bundleRoot = "\(payloadRoot)/\(appBundleURL.lastPathComponent)"
 
-        let bundleRoot =
-            payloadRoot.appendingPathComponent(
-                appBundleURL.lastPathComponent
-            )
+        try writer.writeFile(
+            path: payloadRoot + "/",
+            data: nil,
+            permissions: Self.S_IFDIR | Self.defaultDirPermissions
+        )
+        let appAttributes = try attributesOfItem(atPath: appBundleURL.path)
+        let appPermissions = (appAttributes[.posixPermissions] as? NSNumber)?.uint32Value
+            ?? Self.defaultDirPermissions
+        try writer.writeFile(
+            path: bundleRoot + "/",
+            data: nil,
+            permissions: Self.S_IFDIR | appPermissions
+        )
 
         let enumerator = self.enumerator(
             at: appBundleURL,
@@ -193,9 +202,7 @@ extension FileManager {
             let relative = fileURL.path
                 .replacingOccurrences(of: appBundleURL.path + "/", with: "")
 
-            let zipPath =
-                bundleRoot.appendingPathComponent(relative).path +
-                (isDirectory ? "/" : "")
+            let zipPath = bundleRoot + "/" + relative + (isDirectory ? "/" : "")
 
             let attributes = try self.attributesOfItem(atPath: fileURL.path)
             let posixPermissions = (attributes[.posixPermissions] as? NSNumber)?.uint32Value ?? (isDirectory ? Self.defaultDirPermissions : Self.defaultFilePermissions)

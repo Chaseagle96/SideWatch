@@ -56,6 +56,12 @@ final class EntitlementReconcilerTests: XCTestCase {
         ) else {
             return nil
         }
-        return ALTProvisioningProfile(data: data)
+        // Production profiles are CMS/DER containers and begin with an ASN.1
+        // sequence byte before the embedded XML property list. The parser
+        // intentionally rejects a bare plist, so mirror that envelope marker
+        // in this synthetic fixture.
+        var encodedProfile = Data([0x30])
+        encodedProfile.append(data)
+        return ALTProvisioningProfile(data: encodedProfile)
     }
 }

@@ -62,7 +62,10 @@ final class SignedBundleGraphTests: XCTestCase {
 
         XCTAssertEqual(application.appIDCount, 4)
         XCTAssertEqual(application.watchApplications.count, 1)
-        XCTAssertTrue(order.contains("Watch/FixtureWatch.app/Frameworks/WatchSupport.framework"))
+        XCTAssertTrue(
+            order.contains("Watch/FixtureWatch.app/Frameworks/WatchSupport.framework"),
+            "Discovered signing order: \(order)"
+        )
         let nestedFrameworkIndex = try XCTUnwrap(
             order.firstIndex(of: "Watch/FixtureWatch.app/Frameworks/WatchSupport.framework/Frameworks/Nested.framework")
         )
