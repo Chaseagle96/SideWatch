@@ -105,6 +105,7 @@ jobs:
           root = "Payload/SideStore.app/"
           assert root in names, "Payload/SideStore.app/ is missing"
           assert root + "SideStore" in names, "SideStore executable is missing"
+          assert root + "SideBackup.ipa" in names, "SideBackup.ipa resource is missing"
           assert any(name.startswith(root + "PlugIns/") and name.endswith(".appex/") for name in names), "embedded extension is missing"
           print(f"Verified {ipa} with {len(names)} archive entries")
           PY
